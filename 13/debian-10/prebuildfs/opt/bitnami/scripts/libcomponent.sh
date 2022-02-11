@@ -20,6 +20,9 @@ DOWNLOAD_URL="https://downloads.bitnami.com/files/stacksmith"
 # Returns:
 #   None
 #########################
+
+OS_ARCH="$( echo $TARGETPLATFORM | cut -d/ -f2)"
+
 component_unpack() {
     local name="${1:?name is required}"
     local version="${2:?version is required}"

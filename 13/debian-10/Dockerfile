@@ -2,9 +2,10 @@ FROM docker.io/bitnami/minideb:buster
 LABEL maintainer "Bitnami <containers@bitnami.com>"
 
 ENV HOME="/" \
-    OS_ARCH="amd64" \
     OS_FLAVOUR="debian-10" \
     OS_NAME="linux"
+
+ARG TARGETPLATFORM
 
 COPY prebuildfs /
 # Install required system packages and dependencies
