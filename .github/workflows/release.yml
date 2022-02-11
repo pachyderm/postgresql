@@ -23,7 +23,7 @@ jobs:
       - name: Push to Docker Hub
         uses: docker/build-push-action@v2
         with:
-          context: .
+          context: "{{defaultContext}}:13/debian-10/"
           push: true
           platforms: linux/amd64,linux/arm64
           tags: pachyderm/postgresql:${{ github.event.release.tag_name }}
