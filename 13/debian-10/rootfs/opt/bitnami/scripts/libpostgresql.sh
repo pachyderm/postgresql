@@ -11,7 +11,6 @@
 . /opt/bitnami/scripts/libos.sh
 . /opt/bitnami/scripts/libservice.sh
 . /opt/bitnami/scripts/libvalidations.sh
-. /opt/bitnami/scripts/libnet.sh
 
 ########################
 # Configure libnss_wrapper so PostgreSQL commands work with a random user.
@@ -157,7 +156,8 @@ postgresql_validate() {
 #########################
 postgresql_create_config() {
     info "postgresql.conf file not detected. Generating it..."
-    cp "$POSTGRESQL_BASE_DIR/share/postgresql.conf.sample" "$POSTGRESQL_CONF_FILE"
+    find / -name postgresql.conf.sample
+    cp /usr/share/postgresql/13/postgresql.conf.sample "$POSTGRESQL_CONF_FILE"
     # Update default value for 'include_dir' directive
     # ref: https://github.com/postgres/postgres/commit/fb9c475597c245562a28d1e916b575ac4ec5c19f#diff-f5544d9b6d218cc9677524b454b41c60
     if ! grep include_dir "$POSTGRESQL_CONF_FILE" >/dev/null; then
@@ -371,11 +371,7 @@ postgresql_configure_replication_parameters() {
     postgresql_set_property "wal_level" "$POSTGRESQL_WAL_LEVEL"
     postgresql_set_property "max_wal_size" "400MB"
     postgresql_set_property "max_wal_senders" "16"
-    if ((psql_major_version >= 13)); then
-        postgresql_set_property "wal_keep_size" "128MB"
-    else
-        postgresql_set_property "wal_keep_segments" "12"
-    fi
+    postgresql_set_property "wal_keep_size" "128MB"
     postgresql_set_property "hot_standby" "on"
 }
 
@@ -389,27 +385,9 @@ postgresql_configure_replication_parameters() {
 #   None
 #########################
 postgresql_configure_synchronous_replication() {
-    local replication_nodes=""
-    info "Configuring synchronous_replication"
-
-    # Check for comma separate values
-    # When using repmgr, POSTGRESQL_CLUSTER_APP_NAME will contain the list of nodes to be synchronous
-    # This list need to cleaned from other things but node names.
-    if [[ "$POSTGRESQL_CLUSTER_APP_NAME" == *","* ]]; then
-        read -r -a nodes <<<"$(tr ',;' ' ' <<<"${POSTGRESQL_CLUSTER_APP_NAME}")"
-        for node in "${nodes[@]}"; do
-            [[ "$node" =~ ^(([^:/?#]+):)?// ]] || node="tcp://${node}"
-
-            host="$(parse_uri "$node" 'host')"
-            replication_nodes="${replication_nodes}${replication_nodes:+,}\"${host}\""
-        done
-    else
-        replication_nodes="\"${POSTGRESQL_CLUSTER_APP_NAME}\""
-    fi
-
     if ((POSTGRESQL_NUM_SYNCHRONOUS_REPLICAS > 0)); then
         postgresql_set_property "synchronous_commit" "$POSTGRESQL_SYNCHRONOUS_COMMIT_MODE"
-        postgresql_set_property "synchronous_standby_names" "${POSTGRESQL_NUM_SYNCHRONOUS_REPLICAS} (${replication_nodes})"
+        postgresql_set_property "synchronous_standby_names" "${POSTGRESQL_NUM_SYNCHRONOUS_REPLICAS} (\"${POSTGRESQL_CLUSTER_APP_NAME}\")"
     fi
 }
 
@@ -644,7 +622,6 @@ postgresql_initialize() {
     # TLS Modifications on pghba need to be performed after properly configuring postgresql.conf file
     is_boolean_yes "$create_pghba_file" && is_boolean_yes "$POSTGRESQL_ENABLE_TLS" && [[ -n $POSTGRESQL_TLS_CA_FILE ]] && postgresql_tls_auth_configuration
 
-    is_boolean_yes "$create_conf_file" && [[ -n "$POSTGRESQL_SHARED_PRELOAD_LIBRARIES" ]] && postgresql_set_property "shared_preload_libraries" "$POSTGRESQL_SHARED_PRELOAD_LIBRARIES"
     is_boolean_yes "$create_conf_file" && postgresql_configure_logging
     is_boolean_yes "$create_conf_file" && postgresql_configure_connections
     is_boolean_yes "$create_conf_file" && postgresql_configure_timezone
@@ -916,7 +893,6 @@ postgresql_configure_recovery() {
     else
         cp -f "$POSTGRESQL_BASE_DIR/share/recovery.conf.sample" "$POSTGRESQL_RECOVERY_FILE"
         chmod 600 "$POSTGRESQL_RECOVERY_FILE"
-        am_i_root && chown "$POSTGRESQL_DAEMON_USER:$POSTGRESQL_DAEMON_GROUP" "$POSTGRESQL_RECOVERY_FILE"
         postgresql_set_property "standby_mode" "on" "$POSTGRESQL_RECOVERY_FILE"
         postgresql_set_property "primary_conninfo" "host=${POSTGRESQL_MASTER_HOST} port=${POSTGRESQL_MASTER_PORT_NUMBER} user=${POSTGRESQL_REPLICATION_USER} password=${POSTGRESQL_REPLICATION_PASSWORD} application_name=${POSTGRESQL_CLUSTER_APP_NAME}" "$POSTGRESQL_RECOVERY_FILE"
         postgresql_set_property "trigger_file" "/tmp/postgresql.trigger.${POSTGRESQL_MASTER_PORT_NUMBER}" "$POSTGRESQL_RECOVERY_FILE"
@@ -933,8 +909,6 @@ postgresql_configure_recovery() {
 #   Boolean
 #########################
 postgresql_configure_logging() {
-    [[ -n "$POSTGRESQL_PGAUDIT_LOG" ]] && postgresql_set_property "pgaudit.log" "$POSTGRESQL_PGAUDIT_LOG"
-    [[ -n "$POSTGRESQL_PGAUDIT_LOG_CATALOG" ]] && postgresql_set_property "pgaudit.log_catalog" "$POSTGRESQL_PGAUDIT_LOG_CATALOG"
     [[ -n "$POSTGRESQL_LOG_CONNECTIONS" ]] && postgresql_set_property "log_connections" "$POSTGRESQL_LOG_CONNECTIONS"
     [[ -n "$POSTGRESQL_LOG_DISCONNECTIONS" ]] && postgresql_set_property "log_disconnections" "$POSTGRESQL_LOG_DISCONNECTIONS"
     [[ -n "$POSTGRESQL_LOG_HOSTNAME" ]] && postgresql_set_property "log_hostname" "$POSTGRESQL_LOG_HOSTNAME"
@@ -1047,8 +1021,11 @@ postgresql_execute_print_output() {
     [[ -n "$db" ]] && args+=("-d" "$db")
     [[ "${#opts[@]}" -gt 0 ]] && args+=("${opts[@]}")
 
-    # Execute the Query/queries from stdin
-    PGPASSWORD=$pass psql "${args[@]}"
+    # Obtain the command specified via stdin
+    local sql_cmd
+    sql_cmd="$(</dev/stdin)"
+    debug "Executing SQL command:\n$sql_cmd"
+    PGPASSWORD=$pass psql "${args[@]}" <<<"$sql_cmd"
 }
 
 ########################
@@ -1170,7 +1147,7 @@ postgresql_ensure_user_exists() {
 
     local -a postgresql_execute_cmd=("postgresql_execute")
     [[ -n "$db_host" && -n "$db_port" ]] && postgresql_execute_cmd=("postgresql_remote_execute" "$db_host" "$db_port")
-    local -a postgresql_execute_flags=("postgres" "$(get_env_var_value POSTGRES_USER)" "$(get_env_var_value POSTGRES_PASSWORD)")
+    local -a postgresql_execute_flags=("" "$(get_env_var_value POSTGRES_USER)" "$(get_env_var_value POSTGRES_PASSWORD)")
 
     "${postgresql_execute_cmd[@]}" "${postgresql_execute_flags[@]}" <<EOF
 DO
@@ -1204,7 +1181,7 @@ postgresql_ensure_user_has_database_privileges() {
 
     local -a postgresql_execute_cmd=("postgresql_execute")
     [[ -n "$db_host" && -n "$db_port" ]] && postgresql_execute_cmd=("postgresql_remote_execute" "$db_host" "$db_port")
-    local -a postgresql_execute_flags=("postgres" "$(get_env_var_value POSTGRES_USER)" "$(get_env_var_value POSTGRES_PASSWORD)")
+    local -a postgresql_execute_flags=("" "$(get_env_var_value POSTGRES_USER)" "$(get_env_var_value POSTGRES_PASSWORD)")
 
     debug "Providing privileges to username ${user} on database ${database}"
     "${postgresql_execute_cmd[@]}" "${postgresql_execute_flags[@]}" <<EOF
@@ -1258,7 +1235,7 @@ postgresql_ensure_database_exists() {
 
     local -a postgresql_execute_cmd=("postgresql_execute")
     [[ -n "$db_host" && -n "$db_port" ]] && postgresql_execute_cmd=("postgresql_remote_execute" "$db_host" "$db_port")
-    local -a postgresql_execute_flags=("postgres" "$(get_env_var_value POSTGRES_USER)" "$(get_env_var_value POSTGRES_PASSWORD)")
+    local -a postgresql_execute_flags=("" "$(get_env_var_value POSTGRES_USER)" "$(get_env_var_value POSTGRES_PASSWORD)")
 
     "${postgresql_execute_cmd[@]}" "${postgresql_execute_flags[@]}" <<EOF
 SELECT 'CREATE DATABASE "${database}"'
@@ -1269,24 +1246,5 @@ EOF
         [[ -n "$db_host" ]] && grant_flags+=("$db_host")
         [[ -n "$db_port" ]] && grant_flags+=("$db_port")
         postgresql_ensure_user_has_database_privileges "${grant_flags[@]}"
-    fi
-}
-
-
-########################
-# Retrieves the WAL directory in use by PostgreSQL / to use if not initialized yet
-# Globals:
-#   REPMGR_*
-# Arguments:
-#   None
-# Returns:
-#   the path to the WAL directory, or empty if not set
-#########################
-postgresql_get_waldir() {
-    if [[ -L "${POSTGRESQL_DATA_DIR}/pg_wal" && -d "${POSTGRESQL_DATA_DIR}/pg_wal" ]]; then
-        readlink -f "${POSTGRESQL_DATA_DIR}/pg_wal"
-    else
-        # Uninitialized - using value from $POSTGRESQL_INITDB_WAL_DIR if set
-        echo "$POSTGRESQL_INITDB_WAL_DIR"
     fi
 }
